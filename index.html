@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>간단 메모장</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;background:#fff;color:#222;font:16px/1.5 system-ui,sans-serif}
+    main{width:min(100%,560px);margin:32px auto;padding:0 16px}h1{font-size:26px;margin:0 0 20px}
+    section,article{border:1px solid #ddd;border-radius:10px;padding:18px;margin:0 0 16px}
+    label{display:block;margin:12px 0 6px}input,textarea,button{font:inherit}
+    input,textarea{display:block;width:100%;padding:10px;border:1px solid #aaa;border-radius:6px}
+    textarea{min-height:140px;resize:vertical}button{padding:9px 15px;border:1px solid #aaa;border-radius:6px;background:#f6f6f6;cursor:pointer}
+    button:disabled{opacity:.55;cursor:wait}.actions{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}
+    #account{overflow-wrap:anywhere;margin:0}#status{min-height:24px;overflow-wrap:anywhere}#status.error{color:#b42318}
+    article p{white-space:pre-wrap;overflow-wrap:anywhere;margin:0 0 12px}#empty{color:#666} [hidden]{display:none!important}
+  </style>
+</head>
+<body>
+<main>
+  <h1>간단 메모장</h1>
+  <p id="status" role="status" aria-live="polite">불러오는 중…</p>
+  <section id="guest" hidden>
+    <form id="auth-form">
+      <label for="email">이메일</label>
+      <input id="email" type="email" autocomplete="username" required>
+      <label for="password">비밀번호 (6자 이상)</label>
+      <input id="password" type="password" minlength="6" autocomplete="current-password" required>
+      <div class="actions"><button type="submit">로그인</button><button id="signup" type="button">회원가입</button></div>
+    </form>
+  </section>
+  <div id="member" hidden>
+    <section>
+      <p id="account"></p>
+      <div class="actions"><button id="logout" type="button">로그아웃</button></div>
+    </section>
+    <section>
+      <form id="memo-form">
+        <label for="content">메모 내용</label>
+        <textarea id="content" required maxlength="10000" placeholder="메모를 입력하세요."></textarea>
+        <div class="actions"><button type="submit">저장</button></div>
+      </form>
+    </section>
+    <h2 style="font-size:20px">내 메모</h2>
+    <p id="empty" hidden>저장한 메모가 없습니다.</p>
+    <div id="list"></div>
+  </div>
+</main>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.102.0/dist/umd/supabase.js"></script>
+<script>
+(() => {
+  'use strict';
+  const $ = id => document.getElementById(id);
+  const status = (message = '', error = false) => {
+    $('status').textContent = message;
+    $('status').classList.toggle('error', error);
+  };
+  if (!window.supabase) { status('연결 도구를 불러오지 못했습니다. 인터넷 연결 후 새로고침해 주세요.', true); return; }
+  const db = window.supabase.createClient('https://yamofrzubrgscaxhvwqy.supabase.co', 'sb_publishable_18-5TYP62yjyPt_05urVvg_VNBewkrJ', {
+    auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: false, storageKey: 'simple-memo-auth' }
+  });
+  let user = null, busy = false, revision = 0;
+  function readableError(error) {
+    if (error?.code === 'invalid_credentials') return '이메일 또는 비밀번호를 확인해 주세요.';
+    if (error?.code === 'user_already_exists') return '이미 가입한 이메일입니다. 로그인해 주세요.';
+    if (error?.code === 'over_request_rate_limit' || error?.status === 429) return '요청이 많습니다. 잠시 후 다시 시도해 주세요.';
+    if (error?.code === 'email_address_invalid') return '사용 가능한 이메일 주소를 입력해 주세요.';
+    return '처리하지 못했습니다. 인터넷 연결과 입력 내용을 확인하고 다시 시도해 주세요.';
+  }
+  async function run(message, action) {
+    if (busy) return;
+    busy = true;
+    document.querySelectorAll('button').forEach(button => button.disabled = true);
+    status(message);
+    try { await action(); } catch (error) { status(readableError(error), true); }
+    finally { busy = false; document.querySelectorAll('button').forEach(button => button.disabled = false); }
+  }
+  async function loadMemos() {
+    const currentUser = user;
+    const ticket = ++revision;
+    if (!currentUser) return;
+    const { data, error } = await db.from('memos').select('id,content,created_at').eq('user_id', currentUser.id).order('created_at', { ascending: false });
+    if (ticket !== revision || user?.id !== currentUser.id) return;
+    if (error) throw error;
+    $('list').replaceChildren();
+    $('empty').hidden = data.length !== 0;
+    data.forEach(memo => {
+      const article = document.createElement('article');
+      const text = document.createElement('p');
+      text.textContent = memo.content;
+      const button = document.createElement('button');
+      button.type = 'button'; button.textContent = '삭제'; button.disabled = busy;
+      button.addEventListener('click', () => run('삭제 중…', async () => {
+        const { data: deleted, error } = await db.from('memos').delete().eq('id', memo.id).eq('user_id', user.id).select('id');
+        if (error) throw error;
+        if (!deleted.length) throw new Error('Memo not deleted');
+        await loadMemos(); status('삭제했습니다.');
+      }));
+      article.append(text, button); $('list').append(article);
+    });
+  }
+  async function render(session) {
+    const previousId = user?.id;
+    user = session?.user ?? null;
+    $('guest').hidden = !!user; $('member').hidden = !user;
+    $('account').textContent = user?.email ?? '';
+    if (!user || previousId !== user.id) { revision++; $('list').replaceChildren(); $('content').value = ''; }
+    if (user) { await loadMemos(); status(); }
+    else status();
+  }
+  $('auth-form').addEventListener('submit', event => {
+    event.preventDefault();
+    run('로그인 중…', async () => {
+      const { data, error } = await db.auth.signInWithPassword({ email: $('email').value.trim(), password: $('password').value });
+      if (error) throw error;
+      $('password').value = ''; await render(data.session); status('로그인했습니다.');
+    });
+  });
+  $('signup').addEventListener('click', () => {
+    if (!$('auth-form').reportValidity()) return;
+    run('가입 중…', async () => {
+      const { data, error } = await db.auth.signUp({ email: $('email').value.trim(), password: $('password').value });
+      if (error) throw error;
+      if (!data.session) { status('자동 로그인되지 않았습니다. 이미 가입한 이메일인지 확인해 주세요.', true); return; }
+      $('password').value = ''; await render(data.session); status('가입했습니다. 바로 메모를 작성하세요.');
+    });
+  });
+  $('logout').addEventListener('click', () => run('로그아웃 중…', async () => {
+    const { error } = await db.auth.signOut(); if (error) throw error;
+    await render(null); status('로그아웃했습니다.');
+  }));
+  $('memo-form').addEventListener('submit', event => {
+    event.preventDefault();
+    const content = $('content').value.trim();
+    if (!content) { status('메모 내용을 입력해 주세요.', true); return; }
+    run('저장 중…', async () => {
+      const { error } = await db.from('memos').insert({ user_id: user.id, content });
+      if (error) throw error;
+      $('content').value = ''; await loadMemos(); status('저장했습니다.');
+    });
+  });
+  db.auth.onAuthStateChange((event, session) => {
+    if (event === 'SIGNED_OUT') { void render(null); }
+    else if (event === 'SIGNED_IN' && user?.id !== session?.user.id) {
+      setTimeout(() => { if (user?.id !== session?.user.id) render(session).catch(error => status(readableError(error), true)); }, 0);
+    }
+  });
+  db.auth.getSession().then(({ data, error }) => {
+    if (error) status(readableError(error), true); else return render(data.session);
+  }).catch(error => status(readableError(error), true));
+})();
+</script>
+</body>
+</html>
